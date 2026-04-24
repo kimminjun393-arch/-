@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>실시간 보물 쟁탈전</title>
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <style>
+        body { background-color: #1a1a1a; color: white; text-align: center; font-family: 'Black Han Sans', sans-serif; margin: 0; padding-top: 20px; }
+        #setup { margin-bottom: 15px; }
+        input { padding: 8px; font-size: 16px; border-radius: 5px; outline: none; border: none; text-align: center; }
+        button { padding: 8px 15px; font-size: 16px; cursor: pointer; border-radius: 5px; border: none; font-weight: bold; margin: 0 5px; }
+        .btn-dog { background: #3498db; color: white; }
+        .btn-cat { background: #e74c3c; color: white; }
+        canvas { background-color: #2c3e50; border: 5px solid #ecf0f1; border-radius: 10px; box-shadow: 0 0 20px rgba(0,0,0,0.5); display: none; margin: 0 auto; }
+        #scoreBoard { font-size: 24px; margin: 10px 0; display: none; }
+        .dog-score { color: #3498db; font-weight: bold; }
+        .cat-score { color: #e74c3c; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>💎 보물 쟁탈전 💎</h1>
+    
+    <div id="setup">
+        <input type="text" id="roomInput" placeholder="방 이름 (예: 게임방1)"><br><br>
+        <button class="btn-dog" onclick="startGame('🐶')">강아지(🐶)로 접속</button>
+        <button class="btn-cat" onclick="startGame('🐱')">고양이(🐱)로 접속</button>
+    </div>
+
+    <div id="scoreBoard">
+        🐶 강아지: <span id="score1" class="dog-score">0</span> 
+        | 🐱 고양이: <span id="score2" class="cat-score">0</span>
+    </div>
+
+    <canvas id="gameCanvas" width="800" height="500"></canvas>
+
+    <script>
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d");
+        
+        let client;
+        let myRoom = "";
+        let myRole = ""; // '🐶' 또는 '🐱'
+        let myScore = 0;
+        let enemyScore = 0;
+
+        // 플레이어 & 보석 상태
+        let me = { x: 100, y: 100, size: 40 };
+        let enemy = { x: 600, y: 300, size: 40 };
+        let coin = { x: 400, y: 250, size: 30 };
+
+        // 키보드 입력 상태
+        const keys = {};
+        window.addEventListener("keydown", e => keys[e.key] = true);
+        window.addEventListener("keyup", e => keys[e.key] = false);
+
+        function startGame(role) {
+            const roomName = document.getElementById("roomInput").value.trim();
+            if (!roomName) return alert("방 이름을 입력해주세요!");
+
+            myRole = role;
+            myRoom = "github-game/rush/" + roomName;
+            
+            // UI 변경
+            document.getElementById("setup").style.display = "none";
+            document.getElementById("scoreBoard").style.display = "block";
+            canvas.style.display = "block";
+
+            // 시작 위치 설정
+            me.x = myRole === '🐶' ? 100 : 700;
+            me.y = 250;
+
+            // MQTT 서버 연결
+            client = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
+            
+            client.on('connect', () => {
+                client.subscribe(myRoom);
+                // 0.05초마다 내 위치를 서버(상대방)로 전송
+                setInterval(sendMyPosition, 50);
+                gameLoop(); // 게임 시작
+            });
+
+            client.on('message', (topic, message) => {
+                const data = JSON.parse(message.toString());
+                
+                // 상대방이 보낸 위치 정보 업데이트
+                if (data.type === "move" && data.role !== myRole) {
+                    enemy.x = data.x;
+                    enemy.y = data.y;
+                }
+                // 누군가 보석을 먹었을 때 새로운 보석 위치 및 점수 동기화
+                else if (data.type === "coin") {
+                    coin.x = data.cx;
+                    coin.y = data.cy;
+                    if (data.role === '🐶') {
+                        document.getElementById("score1").innerText = data.score;
+                    } else {
+                        document.getElementById("score2").innerText = data.score;
+                    }
+                }
+            });
+        }
+
+        function sendMyPosition() {
+            client.publish(myRoom, JSON.stringify({ type: "move", role: myRole, x: me.x, y: me.y }));
+        }
+
+        function update() {
+            // 부드러운 이동 로직 (방향키 4개)
+            const speed = 7;
+            if (keys["ArrowUp"] && me.y > 20) me.y -= speed;
+            if (keys["ArrowDown"] && me.y < canvas.height - 20) me.y += speed;
+            if (keys["ArrowLeft"] && me.x > 20) me.x -= speed;
+            if (keys["ArrowRight"] && me.x < canvas.width - 20) me.x += speed;
+
+            // 보석 먹기 충돌 감지 (피타고라스 정리)
+            const dist = Math.hypot(me.x - coin.x, me.y - coin.y);
+            if (dist < (me.size/2 + coin.size/2)) {
+                myScore++;
+                // 내가 보석을 먹었으니, 새로운 보석 위치를 랜덤으로 생성해서 모두에게 알림
+                const newCx = Math.floor(Math.random() * 700) + 50;
+                const newCy = Math.floor(Math.random() * 400) + 50;
+                
+                client.publish(myRoom, JSON.stringify({ 
+                    type: "coin", role: myRole, score: myScore, cx: newCx, cy: newCy 
+                }));
+            }
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.font = "40px Arial";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+
+            // 보석 그리기
+            ctx.fillText("💎", coin.x, coin.y);
+
+            // 나 그리기
+            ctx.fillText(myRole, me.x, me.y);
+
+            // 상대방 그리기 (내가 강아지면 상대는 고양이)
+            const enemyRole = myRole === '🐶' ? '🐱' : '🐶';
+            ctx.fillText(enemyRole, enemy.x, enemy.y);
+        }
+
+        function gameLoop() {
+            update();
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+    </script>
+</body>
+</html>
